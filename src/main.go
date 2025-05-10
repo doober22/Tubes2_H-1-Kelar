@@ -413,7 +413,7 @@ func reconstructPath(target string, recipeUsed map[string][]string) []string {
 }
 
 func main() {
-	recipes, err := loadRecipes("scraping.json")
+	recipes, err := loadRecipes("src/Scraper/scraping.json")
 	if err != nil {
 		fmt.Println("Failed to load recipes:", err)
 		return
