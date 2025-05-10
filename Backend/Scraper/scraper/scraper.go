@@ -1,4 +1,4 @@
-package main
+package scraper
 
 import (
     "encoding/json"
@@ -20,7 +20,7 @@ type Block struct {
     Recipes []Recipe `json:"recipes"`
 }
 
-func main() {
+func Scrape() {
     var blocks []Block
     var total int
     c := colly.NewCollector()
@@ -101,7 +101,7 @@ func main() {
 
     fmt.Println("Scraping selesai, total produk: ",total)
 
-    file, err := os.Create("output.json")
+    file, err := os.Create("scraping/output.json")
     if err != nil {
         log.Fatal(err)
     }

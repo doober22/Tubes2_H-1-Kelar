@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"log"
+	"scraper/scraper"
 )
 
 type PathResult struct {
@@ -413,7 +415,39 @@ func reconstructPath(target string, recipeUsed map[string][]string) []string {
 }
 
 func main() {
-	recipes, err := loadRecipes("scraping.json")
+	fmt.Print("Do you want to scrape (y/n)? ")
+	var scrapeInput string
+	fmt.Scanln(&scrapeInput)
+	if strings.ToLower(scrapeInput) == "y" {
+		fmt.Println("Scraping...")
+		scraper.Scrape()
+
+		fmt.Println("Scraping completed.")
+		fmt.Println("Flattening recipes...")
+		recipes, err := scraper.FlattenRecipesFromFile("scraping/output.json")
+		if err != nil {
+			log.Fatal("Error flattening recipes:", err)
+		}
+
+		outFile, err := os.Create("scraping/flattened.json")
+		if err != nil {
+			log.Fatal("Error creating output file:", err)
+		}
+		defer outFile.Close()
+
+		encoder := json.NewEncoder(outFile)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(recipes); err != nil {
+			log.Fatal("Error encoding JSON:", err)
+		}
+
+		fmt.Println("Flattened recipes saved to scraping/flattened.json")
+	} else {
+		fmt.Println("Skipping scraping.")
+	}
+
+
+	recipes, err := loadRecipes("scraping/flattened.json")
 	if err != nil {
 		fmt.Println("Failed to load recipes:", err)
 		return
