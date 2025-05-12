@@ -1,521 +1,439 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"os"
 	"strings"
 	"sync"
 	"time"
-	"log"
-	"scraper/scraper"
 )
 
-type PathResult struct {
-	Steps        []string
-	NodesVisited int
-	Time         time.Duration
-}
-
-type Recipe struct {
+type FlatRecipe struct {
 	Element     string `json:"Element"`
 	Ingredient1 string `json:"Ingredient1"`
 	Ingredient2 string `json:"Ingredient2"`
 	Tier        int    `json:"Tier"`
 }
 
-type Result struct {
-	Found bool     `json:"found"`
-	Steps []string `json:"steps"`
+type RecipeNode struct {
+	Element     string
+	Ingredients []*RecipeNode
 }
 
-var (
-	recipesMap   map[string][][]string
-	tierMap      map[string]int
-	baseElements = map[string]bool{
-		"fire": true, "water": true, "earth": true, "air": true, "time": true,
-	}
-	printCount = 0
-	maxPrints  = 200
-)
+var baseElements = map[string]bool{
+	"air":   true,
+	"earth": true,
+	"fire":  true,
+	"water": true,
+}
 
-func loadRecipes(file string) ([]Recipe, error) {
-	data, err := os.ReadFile(file)
+func loadRecipes(path string) ([]FlatRecipe, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var recipes []FlatRecipe
+	err = json.Unmarshal(data, &recipes)
 	if err != nil {
 		return nil, err
 	}
 
-	var recipes []Recipe
-	err = json.Unmarshal(data, &recipes)
-	return recipes, err
+	for i := range recipes {
+		recipes[i].Element = strings.ToLower(recipes[i].Element)
+		recipes[i].Ingredient1 = strings.ToLower(recipes[i].Ingredient1)
+		recipes[i].Ingredient2 = strings.ToLower(recipes[i].Ingredient2)
+	}
+	return recipes, nil
 }
 
-func buildRecipeMap(recipes []Recipe) {
-	recipesMap = make(map[string][][]string)
-	tierMap = make(map[string]int)
+func indexRecipes(recipes []FlatRecipe) map[string][][2]string {
+	index := make(map[string][][2]string)
 	for _, r := range recipes {
-		element := strings.ToLower(r.Element)
-		ingr1 := strings.ToLower(r.Ingredient1)
-		ingr2 := strings.ToLower(r.Ingredient2)
-		ingr := []string{ingr1, ingr2}
-		recipesMap[element] = append(recipesMap[element], ingr)
-		tierMap[element] = r.Tier
+		index[r.Element] = append(index[r.Element], [2]string{r.Ingredient1, r.Ingredient2})
 	}
+	return index
 }
 
-// bfs normal
-func bfsSinglePath(target string) ([]string, bool, int, time.Duration) {
-	startTime := time.Now()
-	visitCount := 0
-	target = strings.ToLower(target)
-	discovered := make(map[string]bool)
-	recipeUsed := make(map[string][]string)
-	for base := range baseElements {
-		discovered[base] = true
-		visitCount++
+func buildSingleTreeDFS(element string, index map[string][][2]string, visited map[string]bool, counter *int) *RecipeNode {
+	*counter++
+	if baseElements[element] {
+		return &RecipeNode{Element: element}
 	}
-	for {
-		newDiscoveries := false
-		for resultElement, recipes := range recipesMap {
-			if discovered[resultElement] {
-				continue
-			}
-			resultTier := tierMap[resultElement]
-			for _, ingredients := range recipes {
-				ingr1 := ingredients[0]
-				ingr2 := ingredients[1]
-				if discovered[ingr1] && discovered[ingr2] {
-					if tierMap[ingr1] >= resultTier || tierMap[ingr2] >= resultTier {
-						if printCount < maxPrints {
-							fmt.Printf("Skipping recipe due to tier: %s + %s => %s (tiers: %d,%d>=%d)\n",
-								ingr1, ingr2, resultElement, tierMap[ingr1], tierMap[ingr2], resultTier)
-							printCount++
-						}
-						continue
-					}
+	if visited[element] {
+		return nil
+	}
+	visited[element] = true
 
-					if printCount < maxPrints {
-						fmt.Printf("Discovered: %s + %s => %s\n", ingr1, ingr2, resultElement)
-						printCount++
+	var tree *RecipeNode
+	if recipes, ok := index[element]; ok {
+		for _, pair := range recipes {
+			left := buildSingleTreeDFS(pair[0], index, cloneVisited(visited), counter)
+			right := buildSingleTreeDFS(pair[1], index, cloneVisited(visited), counter)
+			if left != nil && right != nil {
+				tree = &RecipeNode{Element: element, Ingredients: []*RecipeNode{left, right}}
+				break
+			}
+		}
+	}
+	if tree == nil {
+		tree = &RecipeNode{Element: element}
+	}
+	return tree
+}
+
+func buildNRecipesDFS(element string, index map[string][][2]string, visited map[string]bool, counter *int, maxRecipes int) []*RecipeNode {
+	var trees []*RecipeNode
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	resultChan := make(chan *RecipeNode, maxRecipes)
+	done := make(chan struct{})
+	var once sync.Once
+
+	if counter != nil {
+		mu.Lock()
+		*counter++
+		mu.Unlock()
+	}
+
+	var dfs func(string, map[string]bool) = func(e string, visited map[string]bool) {
+		defer wg.Done()
+
+		select {
+		case <-done:
+			return
+		default:
+		}
+
+		if baseElements[e] || visited[e] {
+			select {
+			case resultChan <- &RecipeNode{Element: e}:
+			case <-done:
+			}
+			return
+		}
+
+		visited[e] = true
+
+		if recipes, ok := index[e]; ok {
+			for _, pair := range recipes {
+				select {
+				case <-done:
+					return
+				default:
+				}
+
+				leftCh := make(chan []*RecipeNode, 1)
+				rightCh := make(chan []*RecipeNode, 1)
+
+				wg.Add(2)
+				go func(p string, v map[string]bool) {
+					defer wg.Done()
+					leftCh <- buildNRecipesDFS(p, index, cloneVisited(v), counter, maxRecipes)
+				}(pair[0], visited)
+
+				go func(p string, v map[string]bool) {
+					defer wg.Done()
+					rightCh <- buildNRecipesDFS(p, index, cloneVisited(v), counter, maxRecipes)
+				}(pair[1], visited)
+
+				lefts := <-leftCh
+				rights := <-rightCh
+
+				for _, l := range lefts {
+					for _, r := range rights {
+						select {
+						case <-done:
+							return
+						default:
+							select {
+							case resultChan <- &RecipeNode{Element: e, Ingredients: []*RecipeNode{l, r}}:
+							case <-done:
+								return
+							}
+						}
 					}
-					discovered[resultElement] = true
-					recipeUsed[resultElement] = []string{ingr1, ingr2}
-					newDiscoveries = true
-					visitCount++
-					if resultElement == target {
-						elapsedTime := time.Since(startTime)
-						return reconstructPath(target, recipeUsed), true, visitCount, elapsedTime
-					}
-					break
 				}
 			}
 		}
-		if !newDiscoveries {
-			break
-		}
 	}
-	elapsedTime := time.Since(startTime)
-	return nil, false, visitCount, elapsedTime
+
+	wg.Add(1)
+	go dfs(element, cloneVisited(visited))
+
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	for recipe := range resultChan {
+		mu.Lock()
+		if len(trees) < maxRecipes {
+			trees = append(trees, recipe)
+		}
+		if len(trees) >= maxRecipes {
+			once.Do(func() { close(done) })
+		}
+		mu.Unlock()
+	}
+
+	return trees
 }
 
-// bfs multiple
-func bfsSinglePathWithVariation(target string, seed int64) ([]string, bool, int, time.Duration) {
-	startTime := time.Now()
-	visitCount := 0
-	target = strings.ToLower(target)
-	discovered := make(map[string]bool)
-	recipeUsed := make(map[string][]string)
+func bfsSingleTree(element string, index map[string][][2]string, counter *int) *RecipeNode {
+	element = strings.ToLower(element)
+	discovered := make(map[string]*RecipeNode)
+
+	queue := []string{}
 	for base := range baseElements {
-		discovered[base] = true
-		visitCount++
+		discovered[base] = &RecipeNode{Element: base}
+		queue = append(queue, base)
+		*counter++
 	}
-	for {
-		newDiscoveries := false
-		var discoveredElements []string
-		for elem := range discovered {
-			discoveredElements = append(discoveredElements, elem)
-		}
-		shuffleElements(discoveredElements, seed)
-		for _, currentElement := range discoveredElements {
-			for resultElement, recipes := range recipesMap {
-				if discovered[resultElement] {
+
+	for len(queue) > 0 {
+		currentSize := len(queue)
+		for i := 0; i < currentSize; i++ {
+			for result, recipes := range index {
+				if _, already := discovered[result]; already {
 					continue
 				}
-				resultTier := tierMap[resultElement]
-				shuffledRecipes := make([][]string, len(recipes))
-				copy(shuffledRecipes, recipes)
-				shuffleRecipes(shuffledRecipes, seed)
-				for _, ingredients := range shuffledRecipes {
-					ingr1 := ingredients[0]
-					ingr2 := ingredients[1]
-					if (ingr1 == currentElement || ingr2 == currentElement) &&
-						discovered[ingr1] && discovered[ingr2] {
-						if tierMap[ingr1] >= resultTier || tierMap[ingr2] >= resultTier {
-							continue
+				for _, pair := range recipes {
+					left, okL := discovered[pair[0]]
+					right, okR := discovered[pair[1]]
+					if okL && okR {
+						discovered[result] = &RecipeNode{
+							Element:     result,
+							Ingredients: []*RecipeNode{left, right},
 						}
-
-						discovered[resultElement] = true
-						recipeUsed[resultElement] = []string{ingr1, ingr2}
-						newDiscoveries = true
-						visitCount++
-
-						if resultElement == target {
-							elapsedTime := time.Since(startTime)
-							return reconstructPath(target, recipeUsed), true, visitCount, elapsedTime
-						}
-
+						queue = append(queue, result)
+						*counter++
 						break
 					}
 				}
 			}
 		}
-
-		if !newDiscoveries {
+		queue = queue[currentSize:]
+		if _, found := discovered[element]; found {
 			break
 		}
-		seed = (seed*17 + 31) % 10000
 	}
 
-	elapsedTime := time.Since(startTime)
-	return nil, false, visitCount, elapsedTime
+	if tree, ok := discovered[element]; ok {
+		return tree
+	}
+	return &RecipeNode{Element: element}
 }
 
-// dfs normal
-func dfsSinglePath(target string) ([]string, bool, int, time.Duration) {
-	startTime := time.Now()
-	visitCount := 0
-	target = strings.ToLower(target)
-	discovered := make(map[string]bool)
-	recipeUsed := make(map[string][]string)
-	var stack []string
-	for base := range baseElements {
-		discovered[base] = true
-		stack = append(stack, base)
-		visitCount++
-	}
-	visited := make(map[string]bool)
 
-	for len(stack) > 0 {
-		current := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		if visited[current] {
-			continue
-		}
-		visited[current] = true
-		for resultElement, recipes := range recipesMap {
-			if discovered[resultElement] {
-				continue
-			}
-			resultTier := tierMap[resultElement]
-			for _, ingredients := range recipes {
-				ingr1 := ingredients[0]
-				ingr2 := ingredients[1]
-				if discovered[ingr1] && discovered[ingr2] {
-					if tierMap[ingr1] >= resultTier || tierMap[ingr2] >= resultTier {
-						if printCount < maxPrints {
-							fmt.Printf("Skipping recipe due to tier: %s + %s => %s (tiers: %d,%d>=%d)\n",
-								ingr1, ingr2, resultElement, tierMap[ingr1], tierMap[ingr2], resultTier)
-							printCount++
-						}
-						continue
-					}
-					if printCount < maxPrints {
-						fmt.Printf("Discovered: %s + %s => %s\n", ingr1, ingr2, resultElement)
-						printCount++
-					}
-					discovered[resultElement] = true
-					recipeUsed[resultElement] = []string{ingr1, ingr2}
-					visitCount++
-					stack = append(stack, resultElement)
-					if resultElement == target {
-						elapsedTime := time.Since(startTime)
-						return reconstructPath(target, recipeUsed), true, visitCount, elapsedTime
-					}
-					break
-				}
-			}
-		}
-	}
-	elapsedTime := time.Since(startTime)
-	return nil, false, visitCount, elapsedTime
-}
 
-// dfs multiple
-func dfsSinglePathWithVariation(target string, seed int64) ([]string, bool, int, time.Duration) {
-	startTime := time.Now()
-	visitCount := 0
-	target = strings.ToLower(target)
-	discovered := make(map[string]bool)
-	recipeUsed := make(map[string][]string)
-	var stack []string
-	for base := range baseElements {
-		discovered[base] = true
-		stack = append(stack, base)
-		visitCount++
-	}
-	shuffleElements(stack, seed)
-	visited := make(map[string]bool)
-	for len(stack) > 0 {
-		current := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		if visited[current] {
-			continue
-		}
 
-		visited[current] = true
-		var possibleResults []string
-		for resultElement, recipes := range recipesMap {
-			if discovered[resultElement] {
-				continue
-			}
-			for _, ingredients := range recipes {
-				ingr1 := ingredients[0]
-				ingr2 := ingredients[1]
+func multiBFS(element string, index map[string][][2]string, counter *int) *RecipeNode {
 
-				if discovered[ingr1] && discovered[ingr2] && (ingr1 == current || ingr2 == current) {
-					resultTier := tierMap[resultElement]
+	root := &RecipeNode{Element: element}
+	nodes := map[string]*RecipeNode{element: root}
+	ingredients := make([][2]string, 0)
 
-					if tierMap[ingr1] >= resultTier || tierMap[ingr2] >= resultTier {
-						continue
-					}
-
-					possibleResults = append(possibleResults, resultElement)
-					break
-				}
-			}
-		}
-		shuffleElements(possibleResults, seed)
-		for _, resultElement := range possibleResults {
-			for _, ingredients := range recipesMap[resultElement] {
-				ingr1 := ingredients[0]
-				ingr2 := ingredients[1]
-
-				if discovered[ingr1] && discovered[ingr2] {
-					discovered[resultElement] = true
-					recipeUsed[resultElement] = []string{ingr1, ingr2}
-					visitCount++
-					stack = append(stack, resultElement)
-
-					if resultElement == target {
-						elapsedTime := time.Since(startTime)
-						return reconstructPath(target, recipeUsed), true, visitCount, elapsedTime
-					}
-
-					break
-				}
-			}
-		}
-		seed = (seed*17 + 31) % 10000
+	if recipes, ok := index[element]; ok {
+		ingredients = append(ingredients, recipes...)
 	}
 
-	elapsedTime := time.Since(startTime)
-	return nil, false, visitCount, elapsedTime
-}
+	buildSubTree := func(pair [2]string, wg *sync.WaitGroup) {
+		defer wg.Done()
 
-func findMultipleRecipes(target string, maxRecipes int, searchMethod string) []PathResult {
-	target = strings.ToLower(target)
-	resultChan := make(chan PathResult, maxRecipes)
+		left := pair[0]
+		right := pair[1]
+
+		leftSubTree := buildRecipeTreeBFS(left, index, counter)
+		rightSubTree := buildRecipeTreeBFS(right, index, counter)
+
+		nodes[left] = leftSubTree
+		nodes[right] = rightSubTree
+
+		if parentNode, exists := nodes[element]; exists {
+			parentNode.Ingredients = append(parentNode.Ingredients, leftSubTree, rightSubTree)
+		}
+	}
 	var wg sync.WaitGroup
-	var mutex sync.Mutex
-	foundPaths := make(map[string]bool)
-	foundCount := 0
-	numThreads := 8
-	if maxRecipes < numThreads {
-		numThreads = maxRecipes
-	}
-	wg.Add(numThreads)
-	for i := 0; i < numThreads; i++ {
-		go func(threadID int) {
-			defer wg.Done()
-			seed := int64(threadID)
-			for {
-				mutex.Lock()
-				if foundCount >= maxRecipes {
-					mutex.Unlock()
-					break
-				}
-				mutex.Unlock()
-				var steps []string
-				var found bool
-				var visitCount int
-				var elapsedTime time.Duration
-				if searchMethod == "bfs" {
-					steps, found, visitCount, elapsedTime = bfsSinglePathWithVariation(target, seed)
-				} else {
-					steps, found, visitCount, elapsedTime = dfsSinglePathWithVariation(target, seed)
-				}
-				if found {
-					pathKey := strings.Join(steps, "|")
 
-					mutex.Lock()
-					if !foundPaths[pathKey] && foundCount < maxRecipes {
-						foundPaths[pathKey] = true
-						foundCount++
-						resultChan <- PathResult{
-							Steps:        steps,
-							NodesVisited: visitCount,
-							Time:         elapsedTime,
-						}
-					}
-					mutex.Unlock()
+	for _, pair := range ingredients {
+		wg.Add(1)
+		go buildSubTree(pair, &wg)
+	}
+
+	wg.Wait()
+	return root
+}
+
+
+
+func buildRecipeTreeBFS(element string, index map[string][][2]string, counter *int) *RecipeNode {
+	queue := []string{element}
+	visited := make(map[string]bool)
+	visited[element] = true
+
+	root := &RecipeNode{Element: element}
+	nodes := map[string]*RecipeNode{element: root}
+
+	for len(queue) > 0 {
+		currentElement := queue[0]
+		queue = queue[1:]
+		if recipes, ok := index[currentElement]; ok {
+			for _, pair := range recipes {
+				left := pair[0]
+				right := pair[1]
+
+				if !visited[left] {
+					queue = append(queue, left)
+					visited[left] = true
+					*counter++
 				}
-				seed = (seed*17 + 31) % 10000
-				time.Sleep(10 * time.Millisecond)
+				if !visited[right] {
+					queue = append(queue, right)
+					visited[right] = true
+					*counter++ 
+				}
+				leftNode, leftExists := nodes[left]
+				if !leftExists {
+					leftNode = &RecipeNode{Element: left}
+					nodes[left] = leftNode
+				}
+
+				rightNode, rightExists := nodes[right]
+				if !rightExists {
+					rightNode = &RecipeNode{Element: right}
+					nodes[right] = rightNode
+				}
+				nodes[currentElement].Ingredients = append(nodes[currentElement].Ingredients, leftNode, rightNode)
 			}
-		}(i)
-	}
-	go func() {
-		wg.Wait()
-		close(resultChan)
-	}()
-	var results []PathResult
-	for result := range resultChan {
-		results = append(results, result)
-	}
-	return results
-}
-
-func shuffleElements(elements []string, seed int64) {
-	r := rand.New(rand.NewSource(seed))
-	r.Shuffle(len(elements), func(i, j int) {
-		elements[i], elements[j] = elements[j], elements[i]
-	})
-}
-
-func shuffleRecipes(recipes [][]string, seed int64) {
-	r := rand.New(rand.NewSource(seed))
-	r.Shuffle(len(recipes), func(i, j int) {
-		recipes[i], recipes[j] = recipes[j], recipes[i]
-	})
-}
-
-func reconstructPath(target string, recipeUsed map[string][]string) []string {
-	var steps []string
-	var buildPath func(element string) []string
-	buildPath = func(element string) []string {
-		if baseElements[element] {
-			return []string{}
 		}
-
-		ingredients, exists := recipeUsed[element]
-		if !exists {
-			return []string{}
-		}
-		path1 := buildPath(ingredients[0])
-		path2 := buildPath(ingredients[1])
-
-		result := append(path1, path2...)
-		result = append(result, fmt.Sprintf("%s + %s = %s", ingredients[0], ingredients[1], element))
-		return result
 	}
+	return root
+}
 
-	steps = buildPath(target)
-	return steps
+
+func cloneVisited(original map[string]bool) map[string]bool {
+	copy := make(map[string]bool)
+	for k, v := range original {
+		copy[k] = v
+	}
+	return copy
+}
+
+func printTree(node *RecipeNode, prefix, childPrefix string) {
+	fmt.Println(prefix + node.Element)
+	for i, child := range node.Ingredients {
+		if i == len(node.Ingredients)-1 {
+			printTree(child, childPrefix+"└── ", childPrefix+"    ")
+		} else {
+			printTree(child, childPrefix+"├── ", childPrefix+"│   ")
+		}
+	}
 }
 
 func main() {
-	fmt.Print("Do you want to scrape (y/n)? ")
-	var scrapeInput string
-	fmt.Scanln(&scrapeInput)
-	if strings.ToLower(scrapeInput) == "y" {
-		fmt.Println("Scraping...")
-		scraper.Scrape()
-
-		fmt.Println("Scraping completed.")
-		fmt.Println("Flattening recipes...")
-		recipes, err := scraper.FlattenRecipesFromFile("scraping/output.json")
-		if err != nil {
-			log.Fatal("Error flattening recipes:", err)
-		}
-
-		outFile, err := os.Create("scraping/flattened.json")
-		if err != nil {
-			log.Fatal("Error creating output file:", err)
-		}
-		defer outFile.Close()
-
-		encoder := json.NewEncoder(outFile)
-		encoder.SetIndent("", "  ")
-		if err := encoder.Encode(recipes); err != nil {
-			log.Fatal("Error encoding JSON:", err)
-		}
-
-		fmt.Println("Flattened recipes saved to scraping/flattened.json")
-	} else {
-		fmt.Println("Skipping scraping.")
-	}
-
-
 	recipes, err := loadRecipes("scraping/flattened.json")
 	if err != nil {
-		fmt.Println("Failed to load recipes:", err)
+		fmt.Println("Error loading recipes:", err)
 		return
 	}
-	buildRecipeMap(recipes)
-	var target string
-	fmt.Print("Enter target element to search for: ")
-	fmt.Scanln(&target)
-	var searchMode string
-	fmt.Print("Search for single recipe or multiple recipes? (single/multiple): ")
-	fmt.Scanln(&searchMode)
-	var useMethod string
-	fmt.Print("Enter search method (bfs or dfs): ")
-	fmt.Scanln(&useMethod)
-	useMethod = strings.ToLower(useMethod)
-	if useMethod != "bfs" && useMethod != "dfs" {
-		fmt.Println("Invalid search method. Defaulting to bfs.")
-		useMethod = "bfs"
+
+	index := indexRecipes(recipes)
+
+	scanner := bufio.NewScanner(os.Stdin)
+	fmt.Print("Enter target element: ")
+	scanner.Scan()
+	target := strings.ToLower(strings.TrimSpace(scanner.Text()))
+
+	fmt.Print("Choose recipe type (single/multiple): ")
+	scanner.Scan()
+	recipeType := strings.ToLower(strings.TrimSpace(scanner.Text()))
+
+	var algo string
+	var maxRecipes int
+	switch recipeType {
+	case "single", "multiple":
+		fmt.Print("Choose algorithm (dfs/bfs): ")
+		scanner.Scan()
+		algo = strings.ToLower(strings.TrimSpace(scanner.Text()))
+	default:
+		fmt.Println("Invalid recipe type. Use 'single' or 'multiple'.")
+		return
 	}
-	fmt.Printf("Searching for: %s using %s\n", target, useMethod)
-	if strings.ToLower(searchMode) == "multiple" {
-		var maxRecipes int
-		fmt.Print("Enter maximum number of recipes to find: ")
-		fmt.Scanln(&maxRecipes)
 
-		if maxRecipes <= 0 {
-			fmt.Println("Invalid number. Defaulting to 5.")
-			maxRecipes = 5
+	if recipeType == "multiple" && algo == "dfs" {
+		fmt.Print("Enter the number of recipes to find (N): ")
+		scanner.Scan()
+		fmt.Sscanf(scanner.Text(), "%d", &maxRecipes)
+	}
+
+	switch recipeType {
+	case "single":
+		switch algo {
+		case "bfs":
+			fmt.Println("\n[Single Recipe Tree - BFS]")
+			start := time.Now()
+			counter := 0
+			rootTree := bfsSingleTree(target, index, &counter)
+			duration := time.Since(start)
+
+			fmt.Printf("\nRecipe Tree for %s:\n", target)
+			printTree(rootTree, "", "")
+
+			fmt.Printf("\nNodes visited: %d\n", counter)
+			fmt.Printf("Time taken: %dms\n", duration.Milliseconds())
+
+		case "dfs":
+			fmt.Println("\n[Single Recipe Tree - DFS]")
+			start := time.Now()
+			counter := 0
+			rootTree := buildSingleTreeDFS(target, index, make(map[string]bool), &counter)
+			duration := time.Since(start)
+
+			fmt.Printf("\nRecipe Tree for %s:\n", target)
+			printTree(rootTree, "", "")
+
+			fmt.Printf("\nNodes visited: %d\n", counter)
+			fmt.Printf("Time taken: %dms\n", duration.Milliseconds())
+
+		default:
+			fmt.Println("Invalid algorithm. Use 'dfs' or 'bfs'.")
 		}
 
-		fmt.Printf("Searching for up to %d different recipes for %s using %s with multithreading...\n",
-			maxRecipes, target, useMethod)
+	case "multiple":
+		switch algo {
+		case "bfs":
+			fmt.Println("\n[Multiple Recipe Tree - BFS]")
+			start := time.Now()
+			counter := 0
+			rootTree := multiBFS(target, index, &counter)
+			duration := time.Since(start)
 
-		startTime := time.Now()
-		results := findMultipleRecipes(target, maxRecipes, useMethod)
-		totalTime := time.Since(startTime)
+			fmt.Printf("\nRecipe Tree for %s:\n", target)
+			printTree(rootTree, "", "")
 
-		fmt.Printf("\nFound %d different recipes for %s in %v\n", len(results), target, totalTime)
+			fmt.Printf("\nNodes visited: %d\n", counter)
+			fmt.Printf("Time taken: %dms\n", duration.Milliseconds())
 
-		for i, result := range results {
-			fmt.Printf("\n--- Recipe %d ---\n", i+1)
-			fmt.Printf("Nodes visited: %d\n", result.NodesVisited)
-			fmt.Printf("Search time: %v\n", result.Time)
-			fmt.Println("Steps:")
-			for j, step := range result.Steps {
-				fmt.Printf("%d. %s\n", j+1, step)
+		case "dfs":
+			fmt.Println("\n[Multiple Recipe Trees - DFS]")
+			start := time.Now()
+			counter := 0
+			trees := buildNRecipesDFS(target, index, make(map[string]bool), &counter, maxRecipes)
+			duration := time.Since(start)
+
+			for i, tree := range trees {
+				fmt.Printf("\nRecipe #%d:\n", i+1)
+				printTree(tree, "", "")
 			}
-		}
-	} else {
-		var steps []string
-		var found bool
-		var visitCount int
-		var elapsedTime time.Duration
-		if useMethod == "bfs" {
-			steps, found, visitCount, elapsedTime = bfsSinglePath(target)
-		} else {
-			steps, found, visitCount, elapsedTime = dfsSinglePath(target)
-		}
-		fmt.Printf("\nSearch statistics (%s):\n", useMethod)
-		fmt.Printf("Nodes visited: %d\n", visitCount)
-		fmt.Printf("Search time: %v\n", elapsedTime)
-		if found {
-			fmt.Printf("\nSteps to create %s:\n", target)
-			for i, step := range steps {
-				fmt.Printf("%d. %s\n", i+1, step)
-			}
-		} else {
-			fmt.Println("\nTarget element not found.")
+
+			fmt.Printf("\nTotal recipes: %d\n", len(trees))
+			fmt.Printf("Nodes visited: %d\n", counter)
+			fmt.Printf("Time taken: %dms\n", duration.Milliseconds())
+
+		default:
+			fmt.Println("Invalid algorithm. Use 'dfs' or 'bfs'.")
 		}
 	}
 }

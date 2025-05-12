@@ -44,15 +44,20 @@ func FlattenRecipesFromFile(inputPath string) ([]FlatRecipe, error) {
 	}
 
 	var results []FlatRecipe
-	tier := 0
+	elementTiers := map[string]int{
+		"Air":   0,
+		"Fire":  0,
+		"Water": 0,
+		"Earth": 0,
+	}
+	tier := 1
 
 	for _, block := range blocks {
-		// Skip blocks with "Time" or "Special element" in title
 		if strings.Contains(strings.ToLower(block.Title), "special") {
 			continue
 		}
 
-		var validRecipes int
+		var validRecipes []FlatRecipe
 		for _, r := range block.Recipes {
 			if strings.EqualFold(r.Product, "Time") || strings.EqualFold(r.Product, "Archeologist") || r.Ingredients == nil || len(r.Ingredients) == 0 {
 				continue
@@ -65,15 +70,28 @@ func FlattenRecipesFromFile(inputPath string) ([]FlatRecipe, error) {
 				if strings.EqualFold(pair[0], "Time") || strings.EqualFold(pair[1], "Time") {
 					continue
 				}
-				results = append(results, newRecipe(r.Product, pair[0], pair[1], tier))
-				validRecipes++
+
+				t1, ok1 := elementTiers[pair[0]]
+				t2, ok2 := elementTiers[pair[1]]
+				if !ok1 || !ok2 {
+					continue 
+				}
+				if t1 >= tier || t2 >= tier {
+					continue
+				}
+				validRecipes = append(validRecipes, newRecipe(r.Product, pair[0], pair[1], tier))
 			}
 		}
 
-		if validRecipes > 0 {
+		if len(validRecipes) > 0 {
+			results = append(results, validRecipes...)
+			for _, r := range validRecipes {
+				elementTiers[r.Element] = tier
+			}
 			tier++
 		}
 	}
 
 	return results, nil
 }
+
