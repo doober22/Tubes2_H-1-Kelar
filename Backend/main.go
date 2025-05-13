@@ -120,8 +120,7 @@ func buildNRecipesDFS(element string, index map[string][][2]string, visited map[
 		mu.Unlock()
 	}
 
-	var dfs func(string, map[string]bool)
-	dfs = func(e string, visited map[string]bool) {
+	dfs := func(e string, visited map[string]bool) {
 		defer wg.Done()
 		select {
 		case <-done:

@@ -1,4 +1,3 @@
-// src/components/StatsPanel.js
 export default function StatsPanel({ time, nodes }) {
   return (
     <div className="p-4 border rounded bg-gray-50">

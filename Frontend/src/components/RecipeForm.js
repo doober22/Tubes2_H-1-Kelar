@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { searchRecipe } from "@/utils/api"; // <<-- ini bagian fetch-nya
+import { searchRecipe } from "@/utils/api"; 
 
 export default function RecipeForm({ onResult }) {
   const [target, setTarget] = useState("");
@@ -11,7 +11,7 @@ export default function RecipeForm({ onResult }) {
     e.preventDefault();
     onResult(null);
     const data = await searchRecipe({ target, method, mode, limit: parseInt (limit) });
-    onResult(data); // lempar ke parent
+    onResult(data); 
   };
 
   return (

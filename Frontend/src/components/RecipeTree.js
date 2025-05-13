@@ -1,4 +1,3 @@
-// src/components/RecipeTree.js
 export default function RecipeTree({ data }) {
   if (!data || data.length === 0) return null;
 
