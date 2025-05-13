@@ -1,9 +1,10 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -18,8 +19,21 @@ type FlatRecipe struct {
 }
 
 type RecipeNode struct {
-	Element     string
-	Ingredients []*RecipeNode
+	Element     string        `json:"element"`
+	Ingredients []*RecipeNode `json:"ingredients,omitempty"`
+}
+
+type SearchRequest struct {
+	Target string `json:"target"`
+	Method string `json:"method"`
+	Mode   string `json:"mode"`
+	Limit  int    `json:"limit"`
+}
+
+type SearchResponse struct {
+	Trees        []*RecipeNode `json:"trees"`
+	TimeMs       float64       `json:"timeMs"`
+	NodesVisited int           `json:"nodesVisited"`
 }
 
 var baseElements = map[string]bool{
@@ -28,6 +42,8 @@ var baseElements = map[string]bool{
 	"fire":  true,
 	"water": true,
 }
+
+var recipesIndex map[string][][2]string
 
 func loadRecipes(path string) ([]FlatRecipe, error) {
 	data, err := os.ReadFile(path)
@@ -39,7 +55,6 @@ func loadRecipes(path string) ([]FlatRecipe, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	for i := range recipes {
 		recipes[i].Element = strings.ToLower(recipes[i].Element)
 		recipes[i].Ingredient1 = strings.ToLower(recipes[i].Ingredient1)
@@ -56,8 +71,16 @@ func indexRecipes(recipes []FlatRecipe) map[string][][2]string {
 	return index
 }
 
+func cloneVisited(original map[string]bool) map[string]bool {
+	copy := make(map[string]bool)
+	for k, v := range original {
+		copy[k] = v
+	}
+	return copy
+}
+
 func buildSingleTreeDFS(element string, index map[string][][2]string, visited map[string]bool, counter *int) *RecipeNode {
-	*counter++
+	(*counter)++
 	if baseElements[element] {
 		return &RecipeNode{Element: element}
 	}
@@ -93,19 +116,18 @@ func buildNRecipesDFS(element string, index map[string][][2]string, visited map[
 
 	if counter != nil {
 		mu.Lock()
-		*counter++
+		(*counter)++
 		mu.Unlock()
 	}
 
-	var dfs func(string, map[string]bool) = func(e string, visited map[string]bool) {
+	var dfs func(string, map[string]bool)
+	dfs = func(e string, visited map[string]bool) {
 		defer wg.Done()
-
 		select {
 		case <-done:
 			return
 		default:
 		}
-
 		if baseElements[e] || visited[e] {
 			select {
 			case resultChan <- &RecipeNode{Element: e}:
@@ -113,9 +135,7 @@ func buildNRecipesDFS(element string, index map[string][][2]string, visited map[
 			}
 			return
 		}
-
 		visited[e] = true
-
 		if recipes, ok := index[e]; ok {
 			for _, pair := range recipes {
 				select {
@@ -123,24 +143,19 @@ func buildNRecipesDFS(element string, index map[string][][2]string, visited map[
 					return
 				default:
 				}
-
 				leftCh := make(chan []*RecipeNode, 1)
 				rightCh := make(chan []*RecipeNode, 1)
-
 				wg.Add(2)
 				go func(p string, v map[string]bool) {
 					defer wg.Done()
 					leftCh <- buildNRecipesDFS(p, index, cloneVisited(v), counter, maxRecipes)
 				}(pair[0], visited)
-
 				go func(p string, v map[string]bool) {
 					defer wg.Done()
 					rightCh <- buildNRecipesDFS(p, index, cloneVisited(v), counter, maxRecipes)
 				}(pair[1], visited)
-
 				lefts := <-leftCh
 				rights := <-rightCh
-
 				for _, l := range lefts {
 					for _, r := range rights {
 						select {
@@ -161,7 +176,6 @@ func buildNRecipesDFS(element string, index map[string][][2]string, visited map[
 
 	wg.Add(1)
 	go dfs(element, cloneVisited(visited))
-
 	go func() {
 		wg.Wait()
 		close(resultChan)
@@ -174,8 +188,15 @@ func buildNRecipesDFS(element string, index map[string][][2]string, visited map[
 		}
 		if len(trees) >= maxRecipes {
 			once.Do(func() { close(done) })
+			mu.Unlock()
+			break
 		}
 		mu.Unlock()
+		break
+	}
+
+	if len(trees) == 0 {
+		trees = append(trees, &RecipeNode{Element: element})
 	}
 
 	return trees
@@ -184,14 +205,12 @@ func buildNRecipesDFS(element string, index map[string][][2]string, visited map[
 func bfsSingleTree(element string, index map[string][][2]string, counter *int) *RecipeNode {
 	element = strings.ToLower(element)
 	discovered := make(map[string]*RecipeNode)
-
 	queue := []string{}
 	for base := range baseElements {
 		discovered[base] = &RecipeNode{Element: base}
 		queue = append(queue, base)
-		*counter++
+		(*counter)++
 	}
-
 	for len(queue) > 0 {
 		currentSize := len(queue)
 		for i := 0; i < currentSize; i++ {
@@ -203,12 +222,9 @@ func bfsSingleTree(element string, index map[string][][2]string, counter *int) *
 					left, okL := discovered[pair[0]]
 					right, okR := discovered[pair[1]]
 					if okL && okR {
-						discovered[result] = &RecipeNode{
-							Element:     result,
-							Ingredients: []*RecipeNode{left, right},
-						}
+						discovered[result] = &RecipeNode{Element: result, Ingredients: []*RecipeNode{left, right}}
 						queue = append(queue, result)
-						*counter++
+						(*counter)++
 						break
 					}
 				}
@@ -219,63 +235,46 @@ func bfsSingleTree(element string, index map[string][][2]string, counter *int) *
 			break
 		}
 	}
-
 	if tree, ok := discovered[element]; ok {
 		return tree
 	}
 	return &RecipeNode{Element: element}
 }
 
-
-
-
 func multiBFS(element string, index map[string][][2]string, counter *int) *RecipeNode {
-
 	root := &RecipeNode{Element: element}
 	nodes := map[string]*RecipeNode{element: root}
 	ingredients := make([][2]string, 0)
-
 	if recipes, ok := index[element]; ok {
 		ingredients = append(ingredients, recipes...)
 	}
-
+	var wg sync.WaitGroup
 	buildSubTree := func(pair [2]string, wg *sync.WaitGroup) {
 		defer wg.Done()
-
 		left := pair[0]
 		right := pair[1]
-
 		leftSubTree := buildRecipeTreeBFS(left, index, counter)
 		rightSubTree := buildRecipeTreeBFS(right, index, counter)
-
 		nodes[left] = leftSubTree
 		nodes[right] = rightSubTree
-
 		if parentNode, exists := nodes[element]; exists {
 			parentNode.Ingredients = append(parentNode.Ingredients, leftSubTree, rightSubTree)
 		}
 	}
-	var wg sync.WaitGroup
-
 	for _, pair := range ingredients {
 		wg.Add(1)
 		go buildSubTree(pair, &wg)
 	}
-
 	wg.Wait()
 	return root
 }
-
-
 
 func buildRecipeTreeBFS(element string, index map[string][][2]string, counter *int) *RecipeNode {
 	queue := []string{element}
 	visited := make(map[string]bool)
 	visited[element] = true
-
 	root := &RecipeNode{Element: element}
 	nodes := map[string]*RecipeNode{element: root}
-
 	for len(queue) > 0 {
 		currentElement := queue[0]
 		queue = queue[1:]
@@ -283,23 +282,21 @@ func buildRecipeTreeBFS(element string, index map[string][][2]string, counter *i
 			for _, pair := range recipes {
 				left := pair[0]
 				right := pair[1]
-
 				if !visited[left] {
 					queue = append(queue, left)
 					visited[left] = true
-					*counter++
+					(*counter)++
 				}
 				if !visited[right] {
 					queue = append(queue, right)
 					visited[right] = true
-					*counter++ 
+					(*counter)++
 				}
 				leftNode, leftExists := nodes[left]
 				if !leftExists {
 					leftNode = &RecipeNode{Element: left}
 					nodes[left] = leftNode
 				}
-
 				rightNode, rightExists := nodes[right]
 				if !rightExists {
 					rightNode = &RecipeNode{Element: right}
@@ -312,128 +309,75 @@ func buildRecipeTreeBFS(element string, index map[string][][2]string, counter *i
 	return root
 }
 
-
-func cloneVisited(original map[string]bool) map[string]bool {
-	copy := make(map[string]bool)
-	for k, v := range original {
-		copy[k] = v
+func searchHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
 	}
-	return copy
-}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req SearchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+	start := time.Now()
+	counter := 0
+	var trees []*RecipeNode
+	target := strings.ToLower(req.Target)
 
-func printTree(node *RecipeNode, prefix, childPrefix string) {
-	fmt.Println(prefix + node.Element)
-	for i, child := range node.Ingredients {
-		if i == len(node.Ingredients)-1 {
-			printTree(child, childPrefix+"└── ", childPrefix+"    ")
+	if baseElements[target] {
+		json.NewEncoder(w).Encode(SearchResponse{
+			Trees:        []*RecipeNode{{Element: target}},
+			TimeMs:       0,
+			NodesVisited: 1,
+		})
+		return
+	}
+
+	if _, ok := recipesIndex[target]; !ok {
+		http.Error(w, "Element not available", http.StatusNotFound)
+		return
+	}
+	
+	switch req.Mode {
+	case "single":
+		if req.Method == "dfs" {
+			trees = []*RecipeNode{buildSingleTreeDFS(req.Target, recipesIndex, make(map[string]bool), &counter)}
 		} else {
-			printTree(child, childPrefix+"├── ", childPrefix+"│   ")
+			trees = []*RecipeNode{bfsSingleTree(req.Target, recipesIndex, &counter)}
 		}
+	case "multiple":
+		if req.Method == "dfs" {
+			trees = buildNRecipesDFS(req.Target, recipesIndex, make(map[string]bool), &counter, req.Limit)
+		} else {
+			trees = []*RecipeNode{multiBFS(req.Target, recipesIndex, &counter)}
+		}
+	default:
+		http.Error(w, "Invalid mode", http.StatusBadRequest)
+		return
 	}
+	elapsed := float64(time.Since(start).Nanoseconds()) / 1e6
+	log.Printf("Returning %d trees for %s, visited %d nodes in %.2fms\n", len(trees), req.Target, counter, elapsed)
+	json.NewEncoder(w).Encode(SearchResponse{
+		Trees:        trees,
+		TimeMs:       elapsed,
+		NodesVisited: counter,
+	})
 }
 
 func main() {
 	recipes, err := loadRecipes("scraping/flattened.json")
 	if err != nil {
-		fmt.Println("Error loading recipes:", err)
-		return
+		log.Fatal("Failed to load recipes:", err)
 	}
-
-	index := indexRecipes(recipes)
-
-	scanner := bufio.NewScanner(os.Stdin)
-	fmt.Print("Enter target element: ")
-	scanner.Scan()
-	target := strings.ToLower(strings.TrimSpace(scanner.Text()))
-
-	fmt.Print("Choose recipe type (single/multiple): ")
-	scanner.Scan()
-	recipeType := strings.ToLower(strings.TrimSpace(scanner.Text()))
-
-	var algo string
-	var maxRecipes int
-	switch recipeType {
-	case "single", "multiple":
-		fmt.Print("Choose algorithm (dfs/bfs): ")
-		scanner.Scan()
-		algo = strings.ToLower(strings.TrimSpace(scanner.Text()))
-	default:
-		fmt.Println("Invalid recipe type. Use 'single' or 'multiple'.")
-		return
-	}
-
-	if recipeType == "multiple" && algo == "dfs" {
-		fmt.Print("Enter the number of recipes to find (N): ")
-		scanner.Scan()
-		fmt.Sscanf(scanner.Text(), "%d", &maxRecipes)
-	}
-
-	switch recipeType {
-	case "single":
-		switch algo {
-		case "bfs":
-			fmt.Println("\n[Single Recipe Tree - BFS]")
-			start := time.Now()
-			counter := 0
-			rootTree := bfsSingleTree(target, index, &counter)
-			duration := time.Since(start)
-
-			fmt.Printf("\nRecipe Tree for %s:\n", target)
-			printTree(rootTree, "", "")
-
-			fmt.Printf("\nNodes visited: %d\n", counter)
-			fmt.Printf("Time taken: %dms\n", duration.Milliseconds())
-
-		case "dfs":
-			fmt.Println("\n[Single Recipe Tree - DFS]")
-			start := time.Now()
-			counter := 0
-			rootTree := buildSingleTreeDFS(target, index, make(map[string]bool), &counter)
-			duration := time.Since(start)
-
-			fmt.Printf("\nRecipe Tree for %s:\n", target)
-			printTree(rootTree, "", "")
-
-			fmt.Printf("\nNodes visited: %d\n", counter)
-			fmt.Printf("Time taken: %dms\n", duration.Milliseconds())
-
-		default:
-			fmt.Println("Invalid algorithm. Use 'dfs' or 'bfs'.")
-		}
-
-	case "multiple":
-		switch algo {
-		case "bfs":
-			fmt.Println("\n[Multiple Recipe Tree - BFS]")
-			start := time.Now()
-			counter := 0
-			rootTree := multiBFS(target, index, &counter)
-			duration := time.Since(start)
-
-			fmt.Printf("\nRecipe Tree for %s:\n", target)
-			printTree(rootTree, "", "")
-
-			fmt.Printf("\nNodes visited: %d\n", counter)
-			fmt.Printf("Time taken: %dms\n", duration.Milliseconds())
-
-		case "dfs":
-			fmt.Println("\n[Multiple Recipe Trees - DFS]")
-			start := time.Now()
-			counter := 0
-			trees := buildNRecipesDFS(target, index, make(map[string]bool), &counter, maxRecipes)
-			duration := time.Since(start)
-
-			for i, tree := range trees {
-				fmt.Printf("\nRecipe #%d:\n", i+1)
-				printTree(tree, "", "")
-			}
-
-			fmt.Printf("\nTotal recipes: %d\n", len(trees))
-			fmt.Printf("Nodes visited: %d\n", counter)
-			fmt.Printf("Time taken: %dms\n", duration.Milliseconds())
-
-		default:
-			fmt.Println("Invalid algorithm. Use 'dfs' or 'bfs'.")
-		}
-	}
+	recipesIndex = indexRecipes(recipes)
+	http.HandleFunc("/api/search", searchHandler)
+	fmt.Println("✅ Server running at http://localhost:8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }

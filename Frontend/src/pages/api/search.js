@@ -1,31 +1,30 @@
 // pages/api/search.js
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const { target } = req.body;
+  const { target, method, mode, limit } = req.body;
 
-  // Delay simulasi
-  await new Promise((r) => setTimeout(r, 500));
-
-  const tree = {
-    name: target || 'Unknown',
-    children: [
-      {
-        name: 'ElementA',
-        children: [
-          { name: 'ElementB', children: [] },
-          { name: 'ElementC', children: [] },
-        ],
+  try {
+    const backendRes = await fetch("http://localhost:8080/search", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
       },
-      { name: 'ElementD', children: [] },
-    ],
-  };
+      body: JSON.stringify({ target, method, mode, limit }),
+    });
 
-  res.status(200).json({
-    tree,
-    time: 42,
-    nodesVisited: 13,
-  });
+    if (!backendRes.ok) {
+      const errorText = await backendRes.text();
+      return res.status(backendRes.status).json({ error: errorText });
+    }
+
+    const data = await backendRes.json();
+    return res.status(200).json(data);
+  } catch (error) {
+    console.error("Error contacting Go backend:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
 }

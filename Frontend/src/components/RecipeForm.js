@@ -9,7 +9,8 @@ export default function RecipeForm({ onResult }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    const data = await searchRecipe({ target, method, mode, limit });
+    onResult(null);
+    const data = await searchRecipe({ target, method, mode, limit: parseInt (limit) });
     onResult(data); // lempar ke parent
   };
 
@@ -31,7 +32,7 @@ export default function RecipeForm({ onResult }) {
         <option value="single">Single Recipe</option>
         <option value="multiple">Multiple Recipes</option>
       </select>
-      {mode === "multiple" && (
+      {mode === "multiple" && method === "dfs" && (
         <input
           type="number"
           min="1"
