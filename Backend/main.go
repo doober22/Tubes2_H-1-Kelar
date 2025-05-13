@@ -249,23 +249,31 @@ func multiBFS(element string, index map[string][][2]string, counter *int) *Recip
 		ingredients = append(ingredients, recipes...)
 	}
 	var wg sync.WaitGroup
-	buildSubTree := func(pair [2]string, wg *sync.WaitGroup) {
-		defer wg.Done()
-		left := pair[0]
-		right := pair[1]
-		leftSubTree := buildRecipeTreeBFS(left, index, counter)
-		rightSubTree := buildRecipeTreeBFS(right, index, counter)
-		nodes[left] = leftSubTree
-		nodes[right] = rightSubTree
-		if parentNode, exists := nodes[element]; exists {
-			parentNode.Ingredients = append(parentNode.Ingredients, leftSubTree, rightSubTree)
-		}
-	}
-	for _, pair := range ingredients {
+	
+	results := make([][2]*RecipeNode, len(ingredients))
+
+	for i, pair := range ingredients {
 		wg.Add(1)
-		go buildSubTree(pair, &wg)
+		go func(i int, pair [2]string) {
+			defer wg.Done()
+			left := pair[0]
+			right := pair[1]
+			leftSubTree := buildRecipeTreeBFS(left, index, counter)
+			rightSubTree := buildRecipeTreeBFS(right, index, counter)
+			results[i] = [2]*RecipeNode{leftSubTree, rightSubTree}
+		}(i, pair)
 	}
+
 	wg.Wait()
+	for _, pair := range results {
+		leftSubTree := pair[0]
+		rightSubTree := pair[1]
+
+		nodes[leftSubTree.Element] = leftSubTree
+		nodes[rightSubTree.Element] = rightSubTree
+		root.Ingredients = append(root.Ingredients, leftSubTree, rightSubTree)
+	}
+
 	return root
 }
 
