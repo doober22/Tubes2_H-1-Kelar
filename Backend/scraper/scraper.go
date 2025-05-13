@@ -101,7 +101,7 @@ func Scrape() {
 
     fmt.Println("Scraping selesai, total produk: ",total)
 
-    file, err := os.Create("scraping/output.json")
+    file, err := os.Create("output.json")
     if err != nil {
         log.Fatal(err)
     }
