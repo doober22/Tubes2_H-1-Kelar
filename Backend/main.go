@@ -192,7 +192,6 @@ func buildNRecipesDFS(element string, index map[string][][2]string, visited map[
 			break
 		}
 		mu.Unlock()
-		break
 	}
 
 	if len(trees) == 0 {
@@ -249,7 +248,7 @@ func multiBFS(element string, index map[string][][2]string, counter *int) *Recip
 		ingredients = append(ingredients, recipes...)
 	}
 	var wg sync.WaitGroup
-	
+
 	results := make([][2]*RecipeNode, len(ingredients))
 
 	for i, pair := range ingredients {
@@ -352,7 +351,7 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Element not available", http.StatusNotFound)
 		return
 	}
-	
+
 	switch req.Mode {
 	case "single":
 		if req.Method == "dfs" {
