@@ -385,6 +385,12 @@ func main() {
 	}
 	recipesIndex = indexRecipes(recipes)
 	http.HandleFunc("/api/search", searchHandler)
-	fmt.Println("✅ Server running at http://localhost:8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	fmt.Println("✅ Server running at http://localhost:" + port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
