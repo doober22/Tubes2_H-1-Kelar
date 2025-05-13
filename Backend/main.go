@@ -355,15 +355,15 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 	switch req.Mode {
 	case "single":
 		if req.Method == "dfs" {
-			trees = []*RecipeNode{buildSingleTreeDFS(req.Target, recipesIndex, make(map[string]bool), &counter)}
+			trees = []*RecipeNode{buildSingleTreeDFS(target, recipesIndex, make(map[string]bool), &counter)}
 		} else {
-			trees = []*RecipeNode{bfsSingleTree(req.Target, recipesIndex, &counter)}
+			trees = []*RecipeNode{bfsSingleTree(target, recipesIndex, &counter)}
 		}
 	case "multiple":
 		if req.Method == "dfs" {
-			trees = buildNRecipesDFS(req.Target, recipesIndex, make(map[string]bool), &counter, req.Limit)
+			trees = buildNRecipesDFS(target, recipesIndex, make(map[string]bool), &counter, req.Limit)
 		} else {
-			trees = []*RecipeNode{multiBFS(req.Target, recipesIndex, &counter)}
+			trees = []*RecipeNode{multiBFS(target, recipesIndex, &counter)}
 		}
 	default:
 		http.Error(w, "Invalid mode", http.StatusBadRequest)
